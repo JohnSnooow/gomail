@@ -2,12 +2,15 @@ package gomail
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/smtp"
 	"strings"
 	"time"
+	
+	"golang.org/x/net/proxy"
 )
 
 // A Dialer is a dialer to an SMTP server.
@@ -33,6 +36,14 @@ type Dialer struct {
 	// LocalName is the hostname sent to the SMTP server with the HELO command.
 	// By default, "localhost" is sent.
 	LocalName string
+	// Proxy
+	Proxy bool
+	// ProxyAddress
+	ProxyAddress string
+	// ProxyUsername
+	ProxyUsername string
+	// ProxyPassword
+	ProxyPassword string
 }
 
 // NewDialer returns a new SMTP Dialer. The given parameters are used to connect
@@ -55,10 +66,50 @@ func NewPlainDialer(host string, port int, username, password string) *Dialer {
 	return NewDialer(host, port, username, password)
 }
 
+// SetProxy The given parameters are used to connect to the PROXY server.
+func (d *Dialer) SetProxy(proxyAddress, proxyUsername, proxyPassword string) {
+	d.Proxy = proxyAddress != ""
+	d.ProxyAddress = proxyAddress
+	d.ProxyUsername = proxyUsername
+	d.ProxyPassword = proxyPassword
+}
+
+func (d *Dialer) netProxyDialTimeout() (net.Conn, error) {
+	var auth *proxy.Auth
+	if d.Proxy && d.ProxyUsername != "" {
+		auth = &proxy.Auth{
+			User:     d.ProxyUsername,
+			Password: d.ProxyPassword,
+		}
+	}
+	dialer, err := proxy.SOCKS5("tcp", d.ProxyAddress, auth, proxy.Direct)
+	if err != nil {
+		return nil, err
+	}
+	done := make(chan struct{}, 1)
+	var conn net.Conn
+	go func() {
+		conn, err = dialer.Dial("tcp", addr(d.Host, d.Port))
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		err = errors.New("dial timeout")
+	}
+	return conn, err
+}
+
 // Dial dials and authenticates to an SMTP server. The returned SendCloser
 // should be closed when done using it.
 func (d *Dialer) Dial() (SendCloser, error) {
-	conn, err := netDialTimeout("tcp", addr(d.Host, d.Port), 10*time.Second)
+	var conn net.Conn
+	var err error
+	if d.Proxy {
+		conn, err = d.netProxyDialTimeout()
+	} else {
+		conn, err = netDialTimeout("tcp", addr(d.Host, d.Port), 10*time.Second)
+	}
 	if err != nil {
 		return nil, err
 	}
